@@ -115,17 +115,29 @@ export class AnsIntegrationService {
         this.logger.log(`Consultando documentos adicionais no DynamoDB para ordem: ${ordem}`);
         let documentAdditional: any[] = [];
 
-        try {
-            documentAdditional = await this.dynamoDbService.getItemsByPk(ordem);
-            this.logger.log(`✅ Consulta DynamoDB concluída: ${documentAdditional.length} documento(s) adicional(is) encontrado(s)`);
 
-            if (documentAdditional.length > 0) {
-                this.logger.debug(`Documentos encontrados: ${JSON.stringify(documentAdditional.map(doc => ({ filename: doc.filename, s3path: doc.s3path })))}`);
+        if (body.complementar && Array.isArray(body.complementar) && body.complementar.length > 0) {
+            this.logger.log(`Campo 'complementar' encontrado no body. Ignorando consulta DynamoDB.`);
+            documentAdditional = body.complementar.map((item: any) => ({
+                filename: item.filename || item.path.split('/').pop(),
+                s3path: item.path.startsWith('/') ? item.path.substring(1) : item.path
+            }));
+            this.logger.log(`✅ Documentos complementares carregados a partir do body: ${documentAdditional.length} arquivo(s)`);
+        } else {
+            // 🔸 Fallback: consulta DynamoDB
+            this.logger.log(`Consultando documentos adicionais no DynamoDB para ordem: ${ordem}`);
+            try {
+                documentAdditional = await this.dynamoDbService.getItemsByPk(ordem);
+                this.logger.log(`✅ Consulta DynamoDB concluída: ${documentAdditional.length} documento(s) adicional(is) encontrado(s)`);
+
+                if (documentAdditional.length > 0) {
+                    this.logger.debug(`Documentos encontrados: ${JSON.stringify(documentAdditional.map(doc => ({ filename: doc.filename, s3path: doc.s3path })))}`);
+                }
+            } catch (error) {
+                this.logger.error(`❌ Erro ao consultar DynamoDB para ordem ${ordem}: ${error.message}`);
+                this.logger.warn('Continuando processamento sem documentos adicionais');
+                documentAdditional = [];
             }
-        } catch (error) {
-            this.logger.error(`❌ Erro ao consultar DynamoDB para ordem ${ordem}: ${error.message}`);
-            this.logger.warn('Continuando processamento sem documentos adicionais');
-            documentAdditional = []; // fallback para array vazio em caso de erro
         }
 
         // Envio dos documentos complementares para ANS
@@ -275,7 +287,7 @@ export class AnsIntegrationService {
     }
 
     async addDocumentoComplementar(
-token: string, documentAdditional: any[], ansRegister: string, protocoloId: string, tipoPeticao: string, inclusao: any    ): Promise<void> {
+        token: string, documentAdditional: any[], ansRegister: string, protocoloId: string, tipoPeticao: string, inclusao: any): Promise<void> {
         this.logger.log(`Iniciando envio de ${documentAdditional.length} documento(s) complementar(es) para ANS`);
 
         for (const doc of documentAdditional) {
