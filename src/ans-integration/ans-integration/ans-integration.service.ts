@@ -1,6 +1,6 @@
 import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
-import { firstValueFrom } from 'rxjs';
+import { firstValueFrom, throwError } from 'rxjs';
 import { VaultService } from 'src/vault/vault.service';
 import axios from 'axios';
 import { ConfigService } from '@nestjs/config';
@@ -41,6 +41,7 @@ export class AnsIntegrationService {
         this.logger.log(`Iniciando processamento de impugnação ANS - Tipo do body: ${typeof (body)}`);
         const operadora = body.operadora;
         const numeroABI = body.numeroABI;
+        const requiredDocsCount = body.requiredDocsCount;
         const ordem = body.ordem;
         //01 - listar aquivos do s3
         const caminhoDocumentosCompletares = `uploads/${numeroABI}/${ordem}`;
@@ -126,13 +127,15 @@ export class AnsIntegrationService {
         } else {
             // 🔸 Fallback: consulta DynamoDB
             this.logger.log(`Consultando documentos adicionais no DynamoDB para ordem: ${ordem}`);
+
             try {
+
                 documentAdditional = await this.dynamoDbService.getItemsByPk(ordem);
                 this.logger.log(`✅ Consulta DynamoDB concluída: ${documentAdditional.length} documento(s) adicional(is) encontrado(s)`);
+                this.logger.log(`✅ Requiridos: ${requiredDocsCount} - 👀 Encontrado(s) ${documentAdditional.length}`);
+                if (requiredDocsCount != documentAdditional.length)
+                    throw new Error(`❌ Quantidade de documentos diferente do encontrado no dynamoDB R: ${requiredDocsCount} DB: ${documentAdditional.length}`);
 
-                if (documentAdditional.length > 0) {
-                    this.logger.debug(`Documentos encontrados: ${JSON.stringify(documentAdditional.map(doc => ({ filename: doc.filename, s3path: doc.s3path })))}`);
-                }
             } catch (error) {
                 this.logger.error(`❌ Erro ao consultar DynamoDB para ordem ${ordem}: ${error.message}`);
                 this.logger.warn('Continuando processamento sem documentos adicionais');
@@ -141,11 +144,11 @@ export class AnsIntegrationService {
         }
 
         // Envio dos documentos complementares para ANS
-        if (documentAdditional.length > 0) {
-            await this.addDocumentoComplementar(bearerToken, documentAdditional, registroAns, protocoloId, tipoPeticao, body.inclusao);
+        /*if (documentAdditional.length > 0) {
+            await this.addDocumentoComplementar(bearerToken, documentAdditional, registroAns, protocoloId, tipoPeticao, body.inclusao, requiredDocsCount);
         } else {
             this.logger.log('Nenhum documento complementar para enviar à ANS');
-        }
+        }*/
 
         this.logger.log(`Processo de envio para ANS concluído com sucesso. Protocolo: ${protocoloId}`);
 
@@ -208,7 +211,7 @@ export class AnsIntegrationService {
 
             const url = `https://www.ans.gov.br/e-protocolo/v2/operadoras/${ansRegister}/peticoes/ressarcimento/${tipoPeticao}`;
 
-            // Monta o curl para debug
+            /* Monta o curl para debug
             const curlCmd = `
     curl -X POST "${url}" \\
       -H "Authorization: Bearer ${token}" \\
@@ -216,7 +219,7 @@ export class AnsIntegrationService {
       -d '${bodyPeticao}'
             `.trim();
 
-            this.logger.debug(`cURL equivalente:\n${curlCmd}`);
+            this.logger.debug(`cURL equivalente:\n${curlCmd}`);*/
 
             this.logger.debug(`Request URL: ${url}`);
             this.logger.debug(`Request Body: ${bodyPeticao}`);
@@ -287,13 +290,13 @@ export class AnsIntegrationService {
     }
 
     async addDocumentoComplementar(
-        token: string, documentAdditional: any[], ansRegister: string, protocoloId: string, tipoPeticao: string, inclusao: any): Promise<void> {
+        token: string, documentAdditional: any[], ansRegister: string, protocoloId: string, tipoPeticao: string, inclusao: any, requiredDocsCount: any): Promise<void> {
         this.logger.log(`Iniciando envio de ${documentAdditional.length} documento(s) complementar(es) para ANS`);
 
-        for (const doc of documentAdditional) {
+        for (const [index, doc] of documentAdditional.entries()) {
             try {
-                this.logger.log(`📄 Processando documento complementar: ${doc.filename}`);
-
+                const fileNameDocumentUpload = doc.filename.match(/[^/]+$/);
+                this.logger.log(`📄 Processando documento complementar: ${fileNameDocumentUpload} - INDEX: ${index} - ${requiredDocsCount}`);
                 // normaliza a key para não dar NoSuchKey
                 const key = doc.s3path.replace(/^\//, '');
                 const bufferComplementar = await this.s3Service.downloadAsBuffer(key);
@@ -303,24 +306,24 @@ export class AnsIntegrationService {
                 const blob = new Blob([uint8Array], { type: 'application/pdf' });
 
                 const formData = new FormData();
-                formData.append('nomeArquivo', doc.filename);
+                formData.append('nomeArquivo', `${index + 1}_${requiredDocsCount}_${fileNameDocumentUpload}`);
                 formData.append('assunto', 'Documento comprobatório');
                 formData.append('tipoDocumento', '61'); // TODO: substituir valor fixo
                 const dataDocumento = inclusao ? new Date(inclusao).toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
 
                 // Log detalhado da data
-                this.logger.log(`📅 Processando data do documento ${doc.filename}:`, {
+                /*this.logger.log(`📅 Processando data do documento ${doc.filename}:`, {
                     dataInclusaoOriginal: doc.inclusao,
                     dataDocumentoFormatada: dataDocumento,
                     tipoConversao: doc.inclusao ? 'Campo inclusao convertido' : 'Data atual (inclusao ausente)'
-                });
+                });*/
 
                 formData.append('dataDocumento', dataDocumento);
                 formData.append('arquivo', blob, doc.filename);
                 formData.append('hash', sha256Buffer);
 
                 // Log de todos os campos enviados no FormData
-                this.logger.log(`📋 Campos enviados no FormData para ${doc.filename}:`, {
+                /*this.logger.log(`📋 Campos enviados no FormData para ${doc.filename}:`, {
                     nomeArquivo: doc.filename,
                     assunto: 'Documento comprobatório',
                     tipoDocumento: '61',
@@ -328,21 +331,21 @@ export class AnsIntegrationService {
                     arquivoNome: doc.filename,
                     hash: sha256Buffer,
                     tamanhoArquivo: bufferComplementar.length + ' bytes'
-                });
+                });*/
 
                 const url = `https://www.ans.gov.br/e-protocolo/v2/operadoras/${ansRegister}/peticoes/ressarcimento/${tipoPeticao}/${protocoloId}/documentos/complementares`;
 
                 // Log detalhado da requisição
-                this.logger.debug('Enviando documento complementar para ANS', {
-                    url,
-                    filename: doc.filename,
-                    s3path: doc.s3path,
-                    fileSize: bufferComplementar.length,
-                    hash: sha256Buffer,
-                    ansRegister,
-                    protocoloId,
-                    tipoPeticao
-                });
+                /* this.logger.debug('Enviando documento complementar para ANS', {
+                     url,
+                     filename: doc.filename,
+                     s3path: doc.s3path,
+                     fileSize: bufferComplementar.length,
+                     hash: sha256Buffer,
+                     ansRegister,
+                     protocoloId,
+                     tipoPeticao
+                 });*/
 
                 const response = await firstValueFrom(
                     this.httpService.post(url, formData, {
@@ -352,15 +355,15 @@ export class AnsIntegrationService {
                     }),
                 );
 
-                // Log da resposta de sucesso
+                /* Log da resposta de sucesso
                 this.logger.debug('Resposta ANS para documento complementar', {
                     status: response.status,
-                    statusText: response.statusText,
-                    data: JSON.stringify(response.data),
-                    headers: JSON.stringify(response.headers)
-                });
+                    //statusText: response.statusText,
+                    //data: JSON.stringify(response.data),
+                    //headers: JSON.stringify(response.headers)
+                });*/
 
-                this.logger.log(`✅ Documento complementar ${doc.filename} enviado com sucesso para ANS`);
+                this.logger.log(`🆗 Documento complementar ${fileNameDocumentUpload} enviado com sucesso para ANS - Status: ${response.status}`);
             } catch (error: any) {
                 const status = error?.response?.status || HttpStatus.INTERNAL_SERVER_ERROR;
                 const responseData = error?.response?.data;
