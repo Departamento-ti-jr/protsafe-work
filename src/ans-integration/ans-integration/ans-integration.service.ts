@@ -92,6 +92,7 @@ export class AnsIntegrationService {
 
         // Envio da petição para ANS
         this.logger.log(`Enviando petição ${tipoPeticao} para ANS - Registro: ${registroAns}`);
+
         const protocoloId = await this.enviarPeticaoAns(JSON.stringify(payload), bearerToken, registroAns, tipoPeticao);
         this.logger.log(`✅ Petição enviada com sucesso - Protocolo ANS: ${protocoloId}`);
         //AWS_SQS_PROTOCOL_QUEUE_URL
@@ -133,8 +134,10 @@ export class AnsIntegrationService {
                 documentAdditional = await this.dynamoDbService.getItemsByPk(ordem);
                 this.logger.log(`✅ Consulta DynamoDB concluída: ${documentAdditional.length} documento(s) adicional(is) encontrado(s)`);
                 this.logger.log(`✅ Requiridos: ${requiredDocsCount} - 👀 Encontrado(s) ${documentAdditional.length}`);
-                if (requiredDocsCount != documentAdditional.length)
-                    throw new Error(`❌ Quantidade de documentos diferente do encontrado no dynamoDB R: ${requiredDocsCount} DB: ${documentAdditional.length}`);
+                if (requiredDocsCount != documentAdditional.length){
+                    //throw new Error(`❌ Quantidade de documentos diferente do encontrado no dynamoDB R: ${requiredDocsCount} DB: ${documentAdditional.length}`);
+                    this.logger.warn(`❌ Quantidade de documentos diferente do encontrado no dynamoDB R: ${requiredDocsCount} DB: ${documentAdditional.length}`);
+                }
 
             } catch (error) {
                 this.logger.error(`❌ Erro ao consultar DynamoDB para ordem ${ordem}: ${error.message}`);
@@ -144,11 +147,11 @@ export class AnsIntegrationService {
         }
 
         // Envio dos documentos complementares para ANS
-        /*if (documentAdditional.length > 0) {
+        if (documentAdditional.length > 0) {
             await this.addDocumentoComplementar(bearerToken, documentAdditional, registroAns, protocoloId, tipoPeticao, body.inclusao, requiredDocsCount);
         } else {
             this.logger.log('Nenhum documento complementar para enviar à ANS');
-        }*/
+        }
 
         this.logger.log(`Processo de envio para ANS concluído com sucesso. Protocolo: ${protocoloId}`);
 
