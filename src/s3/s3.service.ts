@@ -140,4 +140,52 @@ export class S3Service {
       throw new Error('Falha ao listar arquivos do S3');
     }
   }
+
+  async downloadAsBufferByUrl(fileUrl: string): Promise<Buffer> {
+    const { bucket, key } = this.parseS3Url(fileUrl);
+
+    const command = new GetObjectCommand({
+      Bucket: bucket,
+      Key: key,
+    });
+
+    const response = await this.s3.send(command);
+
+    if (!response.Body || !(response.Body instanceof Readable)) {
+      throw new Error(`Arquivo inválido ou não encontrado no S3: ${fileUrl}`);
+    }
+
+    const chunks: Buffer[] = [];
+    for await (const chunk of response.Body) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+
+    return Buffer.concat(chunks);
+  }
+  private parseS3Url(fileUrl: string): { bucket: string; key: string } {
+    try {
+      const url = new URL(fileUrl);
+
+      // https://bucket.s3.amazonaws.com/key
+      // https://bucket.s3.us-east-1.amazonaws.com/key
+      if (url.hostname.includes('.s3')) {
+        const bucket = url.hostname.split('.s3')[0];
+        const key = decodeURIComponent(url.pathname.substring(1));
+
+        return { bucket, key };
+      }
+
+      // https://s3.amazonaws.com/bucket/key
+      if (url.hostname === 's3.amazonaws.com') {
+        const [bucket, ...keyParts] = url.pathname.substring(1).split('/');
+        const key = decodeURIComponent(keyParts.join('/'));
+
+        return { bucket, key };
+      }
+
+      throw new Error('Formato de URL S3 não reconhecido');
+    } catch (err) {
+      throw new Error(`URL S3 inválida: ${fileUrl}`);
+    }
+  }
 }

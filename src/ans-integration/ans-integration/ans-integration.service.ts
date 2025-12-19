@@ -1,8 +1,8 @@
 import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
-import { firstValueFrom, throwError } from 'rxjs';
+import { firstValueFrom, retry, throwError, timer } from 'rxjs';
 import { VaultService } from 'src/vault/vault.service';
-import axios from 'axios';
+import axios, { AxiosError } from 'axios';
 import { ConfigService } from '@nestjs/config';
 import * as qs from 'qs';
 import { S3Service } from 'src/s3/s3.service';
@@ -10,6 +10,9 @@ import { S3Service } from 'src/s3/s3.service';
 import { DynamoDbService } from 'src/dynamodb/dynamodb.service';
 import { SqsSendService } from 'src/sqs-listener/sqs-send.service';
 import { createHash } from 'crypto';
+import { DefesaSqsMessageDto } from 'src/defesa-ans/dto/defesa-sqs-message.dto/defesa-sqs-message.dto';
+import { plainToInstance } from 'class-transformer';
+import { validateOrReject } from 'class-validator';
 
 
 interface DocumentAdditional {
@@ -33,129 +36,99 @@ export class AnsIntegrationService {
         this.baseUrl = this.configService.get<string>('ANS_BASE_URL') || 'https://www.ans.gov.br';
     }
 
-    async enviarImpugnacao(body: any): Promise<string> {
-        if (!body) {
-            throw new Error("Mensagem SQS inválida: body está vazio ou undefined");
-        }
+    async enviarImpugnacao(
+        defesaMessage: DefesaSqsMessageDto,
+    ): Promise<string> {
+        this.logger.log(
+            `Iniciando processamento de impugnação ANS`,
+            JSON.stringify(defesaMessage),
+        );
+        const dto = plainToInstance(DefesaSqsMessageDto, defesaMessage, {
+            enableImplicitConversion: true,
+        });
+        console.log(dto.ansRegister)
+        // 2️⃣ Validação
+        await validateOrReject(dto, {
+            whitelist: true,
+            forbidNonWhitelisted: true,
+        });
 
-        this.logger.log(`Iniciando processamento de impugnação ANS - Tipo do body: ${typeof (body)}`);
-        const operadora = body.operadora;
-        const numeroABI = body.numeroABI;
-        const requiredDocsCount = body.requiredDocsCount;
-        const ordem = body.ordem;
-        //01 - listar aquivos do s3
-        const caminhoDocumentosCompletares = `uploads/${numeroABI}/${ordem}`;
-        this.logger.log(`Definindo caminho para documentos complementares: ${caminhoDocumentosCompletares}`);
-        //const filesS3ToUploadAsns = await this.s3Service.listFiles(caminhoDocumentosCompletares)
-        //console.log("files" + JSON.stringify(filesS3ToUploadAsns))
-        //02 - pegar credencial da ans
-        const credentialAns = await this.vaultService.getSecret(operadora.ansRegister);
-        //console.log(credentialAns);
-        // console.log(accessToken);
-        //02 - PEGAR OS DOCUMENTOS DO S3 principal
-        const S3PdfPath = body.S3PdfPath;
-        //documentos adicionais dynamo - temporarily disabled due to AWS permissions
-        this.logger.log(`Preparando consulta ao DynamoDB para ordem: ${ordem}`);
+        const operadora = defesaMessage.registroAns;
+        const numeroABI = defesaMessage.numeroAbi;
+        const registroAns = defesaMessage.ansRegister;
+        const tipoPeticao = defesaMessage.tipoDefesa === "IMPUGNACAO" ? "impugnacoes" : "recursos";
 
 
-        //const documentsAdicionais = [];
-        const documentsAns = {
-            principal: S3PdfPath,
-            adicionais: [] as string[]
-        }
-        // const documentsAdicionais = filesS3ToUploadAsns.map(arq => arq.Key);
-        // documentsAns.adicionais = documentsAdicionais;
+        // 01 - listar aquivos adicionais
+        const caminhoDocumentosCompletares = defesaMessage.s3PathDocAdicional;
 
-        this.logger.log(`Documentos preparados para envio à ANS: Principal=${documentsAns.principal}, Adicionais=${documentsAns.adicionais.length} arquivo(s)`);
+        // //02 - pegar credencial da ans
+        console.log(operadora)
+        const credentialAns = await this.vaultService.getSecret(operadora);
 
+        console.log(credentialAns);
+
+        // 03 - PEGAR O DOCUMENTO DO S3 principal
+        const docPrincipal = defesaMessage.s3PdfPath;
+        const docsAdditional = defesaMessage.s3PathDocAdicional;
+        // /const documentsAdicionais = [];
+        // const documentsAns = {
+        //     principal: S3PdfPath,
+        //     adicionais: [] as string[]
+        // }
+        // // const documentsAdicionais = filesS3ToUploadAsns.map(arq => arq.Key);
+        // // documentsAns.adicionais = documentsAdicionais;
+
+        // Token autorização ANS
         this.logger.log('Solicitando token de autorização OAuth2 da ANS...');
         const accessToken = await this.authorizationToken(credentialAns.scope, credentialAns.client_id, credentialAns.client_secret);
+        const bearerToken = accessToken.access_token;
+        //this.logger.log('OAuth2 da ANS...', accessToken);
 
-        //05 - 
+        const [dia, mes, ano] = defesaMessage.dataFinal.split('/');
+        const dataFimAtendimento = `${dia.padStart(2, '0')}-${mes.padStart(2, '0')}-${ano}`;
+        this.logger.log('Data fim atendimento: ', dataFimAtendimento);
+
+        // //05 - 
         //this.converterToBodyPeticao(); 
-        const payload = {
-            numeroProcesso: body.numeroProcesso.replace(/[^a-zA-Z0-9]/g, ''),
+        const payloadEnvioAns = {
+            numeroProcesso: defesaMessage.numeroProcesso.replace(/[^a-zA-Z0-9]/g, ''),
             informacoesAdicionais: {
-                competenciaAtendimento: body.comp,
-                dataFimAtendimento: `${new Date(body.dataFinal).getDate().toString().padStart(2, '0')}-${(new Date(body.dataFinal).getMonth() + 1).toString().padStart(2, '0')}-${new Date(body.dataFinal).getFullYear()}`
+                competenciaAtendimento: defesaMessage.competencia,
+                dataFimAtendimento: dataFimAtendimento
                 ,
-                numeroAtendimento: body.numeroAihApac
+                numeroAtendimento: defesaMessage.numeroAihApac
             }
         };
-        this.logger.log(`Payload da petição preparado: Processo=${payload.numeroProcesso}, Competência=${payload.informacoesAdicionais.competenciaAtendimento}, Atendimento=${payload.informacoesAdicionais.numeroAtendimento}`);
-        //04 - enviar 
-        const bearerToken = accessToken.access_token;
-        const tipoPeticao = body.tipoDoc === "IMPUGNACAO" ? "impugnacoes" : "recursos";
-        this.logger.log(`Tipo de petição determinado: ${tipoPeticao} (baseado em tipoDoc: ${body.tipoDoc})`);
+        this.logger.log('Data fim atendimento: ', payloadEnvioAns);
 
-        const registroAns = body.registroAns;
-
-        // Envio da petição para ANS
+        // // Envio da petição para ANS
         this.logger.log(`Enviando petição ${tipoPeticao} para ANS - Registro: ${registroAns}`);
 
-        const protocoloId = await this.enviarPeticaoAns(JSON.stringify(payload), bearerToken, registroAns, tipoPeticao);
-        this.logger.log(`✅ Petição enviada com sucesso - Protocolo ANS: ${protocoloId}`);
-        //AWS_SQS_PROTOCOL_QUEUE_URL
-        const protocolQueueUrl = process.env.AWS_SQS_PROTOCOL_QUEUE_URL;
-        if (!protocolQueueUrl) {
-            throw new Error('AWS_SQS_PROTOCOL_QUEUE_URL environment variable is not set');
-        }
-        this.logger.log(`Enviando protocolo ${protocoloId} para fila de processamento MongoDB via SQS`);
-        await this.sqsService.sendMessage(protocolQueueUrl, { protocoloId: protocoloId, _id: body._id });
+        // const protocoloId = await this.enviarPeticaoAns(JSON.stringify(payloadEnvioAns), bearerToken, registroAns, tipoPeticao);
 
-        this.logger.log(`Iniciando envio de documentos para protocolo ${protocoloId}`);
+        // this.logger.log(`✅ Petição enviada com sucesso - Protocolo ANS: ${protocoloId}`);
+        // await this.sqsService.sendMessage(protocolQueueUrl, { protocoloId: protocoloId, _id: body._id });
+        
 
-        // Envio do documento principal
-        if (S3PdfPath) {
-            this.logger.log(`Enviando documento principal: ${S3PdfPath}`);
-            await this.addDocumentoPrincipal(S3PdfPath, bearerToken, registroAns, protocoloId, tipoPeticao);
-        } else {
-            this.logger.warn('Nenhum documento principal especificado para envio');
-        }
+        //## Envio do documento principal
+        // if (protocoloId) {
+        //     await this.addDocumentoPrincipal(docPrincipal, bearerToken, registroAns, protocoloId, tipoPeticao);
+        // }
 
-        // Consulta documentos adicionais no DynamoDB
-        this.logger.log(`Consultando documentos adicionais no DynamoDB para ordem: ${ordem}`);
-        let documentAdditional: any[] = [];
-
-
-        if (body.complementar && Array.isArray(body.complementar) && body.complementar.length > 0) {
-            this.logger.log(`Campo 'complementar' encontrado no body. Ignorando consulta DynamoDB.`);
-            documentAdditional = body.complementar.map((item: any) => ({
-                filename: item.filename || item.path.split('/').pop(),
-                s3path: item.path.startsWith('/') ? item.path.substring(1) : item.path
-            }));
-            this.logger.log(`✅ Documentos complementares carregados a partir do body: ${documentAdditional.length} arquivo(s)`);
-        } else {
-            // 🔸 Fallback: consulta DynamoDB
-            this.logger.log(`Consultando documentos adicionais no DynamoDB para ordem: ${ordem}`);
-
-            try {
-
-                documentAdditional = await this.dynamoDbService.getItemsByPk(ordem);
-                this.logger.log(`✅ Consulta DynamoDB concluída: ${documentAdditional.length} documento(s) adicional(is) encontrado(s)`);
-                this.logger.log(`✅ Requiridos: ${requiredDocsCount} - 👀 Encontrado(s) ${documentAdditional.length}`);
-                if (requiredDocsCount != documentAdditional.length){
-                    //throw new Error(`❌ Quantidade de documentos diferente do encontrado no dynamoDB R: ${requiredDocsCount} DB: ${documentAdditional.length}`);
-                    this.logger.warn(`❌ Quantidade de documentos diferente do encontrado no dynamoDB R: ${requiredDocsCount} DB: ${documentAdditional.length}`);
-                }
-
-            } catch (error) {
-                this.logger.error(`❌ Erro ao consultar DynamoDB para ordem ${ordem}: ${error.message}`);
-                this.logger.warn('Continuando processamento sem documentos adicionais');
-                documentAdditional = [];
+        // Envio dos documentos complementares para ANS
+        if (dto.s3PathDocAdicional?.length) {
+            for (const anexo of dto.s3PathDocAdicional) {
+                this.logger.log(`Iniciando upload do documento principal: ${anexo.url}`);
+                const bufferPrincipal = await this.s3Service.downloadAsBufferByUrl(anexo.url);
+                //await this.addDocumentoComplementar(bearerToken, documentAdditional, registroAns, protocoloId, tipoPeticao, body.inclusao, requiredDocsCount);
             }
         }
 
-        // Envio dos documentos complementares para ANS
-        if (documentAdditional.length > 0) {
-            await this.addDocumentoComplementar(bearerToken, documentAdditional, registroAns, protocoloId, tipoPeticao, body.inclusao, requiredDocsCount);
-        } else {
-            this.logger.log('Nenhum documento complementar para enviar à ANS');
-        }
+        // this.logger.log(`Processo de envio para ANS concluído com sucesso. Protocolo: ${protocoloId}`);
 
-        this.logger.log(`Processo de envio para ANS concluído com sucesso. Protocolo: ${protocoloId}`);
-
-        return protocoloId;
+        // return protocoloId;
+        return "";
     }
 
 
@@ -209,54 +182,66 @@ export class AnsIntegrationService {
         ansRegister: string,
         tipoPeticao: string,
     ): Promise<string> {
+        const url = `https://www.ans.gov.br/e-protocolo/v2/operadoras/${ansRegister}/peticoes/ressarcimento/${tipoPeticao}`;
+
         try {
-            this.logger.log(`Enviando Petição ANS: ${tipoPeticao}`);
-
-            const url = `https://www.ans.gov.br/e-protocolo/v2/operadoras/${ansRegister}/peticoes/ressarcimento/${tipoPeticao}`;
-
-            /* Monta o curl para debug
-            const curlCmd = `
-    curl -X POST "${url}" \\
-      -H "Authorization: Bearer ${token}" \\
-      -H "Content-Type: application/json" \\
-      -d '${bodyPeticao}'
-            `.trim();
-
-            this.logger.debug(`cURL equivalente:\n${curlCmd}`);*/
-
-            this.logger.debug(`Request URL: ${url}`);
-            this.logger.debug(`Request Body: ${bodyPeticao}`);
-
             const response = await firstValueFrom(
-                this.httpService.post(url, bodyPeticao, {
-                    headers: {
-                        Authorization: `Bearer ${token}`,
-                        'Content-Type': 'application/json',
-                        'Accept': 'application/json'
-                    },
-                }),
+                this.httpService
+                    .post(url, bodyPeticao, {
+                        headers: {
+                            Authorization: `Bearer ${token}`,
+                            'Content-Type': 'application/json',
+                            Accept: 'application/json',
+                        },
+                        timeout: 15000,
+                    })
+                    .pipe(
+                        retry({
+                            count: 2,
+                            delay: (error, retryCount) => {
+                                const status = error?.response?.status;
+
+                                // ❌ não retry para erros funcionais
+                                if (status && status < 500) {
+                                    throw error;
+                                }
+
+                                this.logger.warn(
+                                    `Erro ANS. Retry ${retryCount} de 2`,
+                                );
+
+                                return timer(1000 * retryCount); // ✅ ObservableInput
+                            },
+                        }),
+                    ),
             );
 
-            this.logger.log(`Response Status: ${response.status}`);
-            this.logger.log(`Response Headers: ${JSON.stringify(response.headers)}`);
-            this.logger.log(`Response Body: ${JSON.stringify(response.data)}`);
-
-            const codigo = response.data.codigo; // pega o campo "codigo" do JSON
+            const codigo = response.data?.codigo;
             if (!codigo) {
-                throw new Error('Resposta da ANS não contém código do protocolo');
+                throw new HttpException(
+                    'Resposta da ANS não contém código do protocolo',
+                    HttpStatus.BAD_GATEWAY,
+                );
             }
-            return codigo;
-        } catch (error) {
-            // log detalhado
-            this.logger.error(
-                `Falha ao enviar petição: ${error.response?.status} - ${JSON.stringify(error.response?.data)}`,
-            );
 
-            // Lança exceção para que o SQS não delete a mensagem
-            throw new Error(`Falha ao enviar petição para ANS: ${error.message}`);
+            return codigo;
+        } catch (err) {
+            if (err instanceof AxiosError) {
+                const status = err.response?.status ?? HttpStatus.SERVICE_UNAVAILABLE;
+
+                throw new HttpException(
+                    {
+                        message: 'Erro ao comunicar com ANS',
+                        ansStatus: status,
+                        ansResponse: err.response?.data,
+                    },
+                    status,
+                );
+            }
+
+            throw err;
         }
     }
-
 
 
     async addDocumentoPrincipal(
@@ -312,14 +297,14 @@ export class AnsIntegrationService {
                 formData.append('nomeArquivo', `${index + 1}_${requiredDocsCount}_${fileNameDocumentUpload}`);
                 formData.append('assunto', 'Documento comprobatório');
                 formData.append('tipoDocumento', '61'); // TODO: substituir valor fixo
-                const dataDocumento = inclusao ? new Date(inclusao).toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
+                const dataDocumento = this.formatBrazilianDateToISO(inclusao);
 
                 // Log detalhado da data
-                /*this.logger.log(`📅 Processando data do documento ${doc.filename}:`, {
-                    dataInclusaoOriginal: doc.inclusao,
+                this.logger.log(`📅 Processando data do documento ${doc.filename}:`, {
+                    dataInclusaoOriginal: inclusao,
                     dataDocumentoFormatada: dataDocumento,
-                    tipoConversao: doc.inclusao ? 'Campo inclusao convertido' : 'Data atual (inclusao ausente)'
-                });*/
+                    tipoConversao: inclusao ? 'Data brasileira (DD/MM/YYYY) convertida para ISO (YYYY-MM-DD)' : 'Data atual (inclusao ausente)'
+                });
 
                 formData.append('dataDocumento', dataDocumento);
                 formData.append('arquivo', blob, doc.filename);
@@ -415,6 +400,40 @@ export class AnsIntegrationService {
         this.logger.log(`📌 Processamento concluído: ${documentAdditional.length} documento(s) complementar(es) enviado(s) para ANS`);
     }
 
+
+    private formatBrazilianDateToISO(dateString: string): string {
+        if (!dateString) {
+            return new Date().toISOString().split('T')[0];
+        }
+
+        try {
+            // Verifica se está no formato DD/MM/YYYY
+            const brazilianDateRegex = /^(\d{2})\/(\d{2})\/(\d{4})$/;
+            const match = dateString.match(brazilianDateRegex);
+
+            if (match) {
+                const [, day, month, year] = match;
+                // Converte para formato ISO: YYYY-MM-DD
+                const isoDate = `${year}-${month}-${day}`;
+                this.logger.debug(`Data convertida: ${dateString} -> ${isoDate}`);
+                return isoDate;
+            }
+
+            // Se não estiver no formato esperado, tenta conversão direta
+            const date = new Date(dateString);
+            if (!isNaN(date.getTime())) {
+                const isoDate = date.toISOString().split('T')[0];
+                this.logger.debug(`Data convertida (formato alternativo): ${dateString} -> ${isoDate}`);
+                return isoDate;
+            }
+
+            throw new Error(`Formato de data não reconhecido: ${dateString}`);
+
+        } catch (error) {
+            this.logger.warn(`Erro ao converter data ${dateString}: ${error.message}. Usando data atual.`);
+            return new Date().toISOString().split('T')[0];
+        }
+    }
 
     async generateSHA256(buffer: Buffer): Promise<string> {
         return new Promise((resolve, reject) => {
