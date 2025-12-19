@@ -117,8 +117,8 @@ export class AnsIntegrationService {
         // }
 
         // Envio dos documentos complementares para ANS
-        if (dto.s3PathDocAdicional?.length) {
-            for (const anexo of dto.s3PathDocAdicional) {
+        if (docsAdditional?.length) {
+            for (const anexo of docsAdditional) {
                 this.logger.log(`Iniciando upload do documento principal: ${anexo.url}`);
                 const bufferPrincipal = await this.s3Service.downloadAsBufferByUrl(anexo.url);
                 //await this.addDocumentoComplementar(bearerToken, documentAdditional, registroAns, protocoloId, tipoPeticao, body.inclusao, requiredDocsCount);
