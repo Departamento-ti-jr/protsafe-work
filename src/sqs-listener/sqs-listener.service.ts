@@ -1,5 +1,5 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
-import { SQSClient, ReceiveMessageCommand, DeleteMessageCommand } from '@aws-sdk/client-sqs';
+import { SQSClient, ReceiveMessageCommand, DeleteMessageCommand, SendMessageCommand } from '@aws-sdk/client-sqs';
 import { ConfigService } from '@nestjs/config';
 import { AnsIntegrationService } from 'src/ans-integration/ans-integration/ans-integration.service';
 import { S3Service } from '../s3/s3.service';
@@ -53,14 +53,19 @@ export class SqsListenerService implements OnModuleInit, OnModuleDestroy {
 
           for (const message of response.Messages) {
             this.logger.log(`Mensagem recebida: ${message.Body}`);
-            
+
             try {
               // Processa a mensagem e só deleta se for bem-sucedido
-              const protocoloId = await this.ansIntegration.enviarImpugnacao(JSON.parse(message.Body!));
-              
+              const protocoloData = await this.ansIntegration.enviarImpugnacao(JSON.parse(message.Body!));
+              const protocolQueueUrl = process.env.AWS_SQS_PROTOCOL_QUEUE_URL!;
               // Se chegou até aqui, o processamento foi bem-sucedido
-              this.logger.log(`Processamento bem-sucedido. Protocolo ANS: ${protocoloId}`);
-              
+              this.logger.log(`Processamento bem-sucedido. Protocolo ANS: ${JSON.stringify(protocoloData)}`);
+
+              await this.sendMessage(
+                process.env.AWS_SQS_PROTOCOL_QUEUE_URL!,
+                protocoloData
+              );
+
               if (message.ReceiptHandle) {
                 await this.deleteMessage(message.ReceiptHandle);
               }
@@ -78,7 +83,7 @@ export class SqsListenerService implements OnModuleInit, OnModuleDestroy {
       }
 
       const elapsed = Date.now() - start;
-     // this.logger.debug(`Fim do ciclo de polling (duração: ${elapsed}ms).`);
+      // this.logger.debug(`Fim do ciclo de polling (duração: ${elapsed}ms).`);
     }
   }
 
@@ -92,6 +97,21 @@ export class SqsListenerService implements OnModuleInit, OnModuleDestroy {
     this.logger.log('Mensagem deletada da fila com sucesso.');
   }
 
+  private async sendMessage(queueUrl: string, payload: any): Promise<void> {
+    const messageBody = JSON.stringify(payload);
 
+    const command = new SendMessageCommand({
+      QueueUrl: queueUrl,
+      MessageBody: messageBody,
+    });
+
+    try {
+      await this.sqsClient.send(command);
+      this.logger.log(`Mensagem enviada para SQS (${queueUrl})`);
+    } catch (error) {
+      this.logger.error(`Erro ao enviar mensagem para SQS (${queueUrl}):`, error);
+      throw error;
+    }
+  }
 
 }
