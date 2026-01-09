@@ -1,29 +1,40 @@
 # ======================
-# Etapa 1: Build
+# Stage 1 — Build
 # ======================
 FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-COPY package*.json ./
-RUN npm ci
+# Dependências básicas
+RUN apk add --no-cache git
+
+# Ativa corepack (Yarn oficial do Node 20)
+RUN corepack enable
+
+COPY package.json yarn.lock ./
+
+# Instala dependências de forma determinística
+RUN yarn install --frozen-lockfile
 
 COPY . .
-RUN npm run build
+
+# Build do NestJS
+RUN yarn build
 
 
 # ======================
-# Etapa 2: Runtime
+# Stage 2 — Runtime
 # ======================
 FROM node:20-alpine
 
 WORKDIR /app
-
 ENV NODE_ENV=production
 
+RUN corepack enable
+
 COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/package*.json ./
 COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package.json ./
 
 EXPOSE 3000
 
