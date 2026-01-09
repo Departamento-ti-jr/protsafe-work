@@ -27,7 +27,7 @@ export class VaultService {
    */
   async getSecret(path: string): Promise<any> {
     try {
-      const response = await this.client.get(`/v1/secret/data/protsafe/${path}`);
+      const response = await this.client.get(`/v1/secret/data/${path}`);
       // KV v2 -> segredo está em data.data
       return response.data?.data?.data || null;
     } catch (error) {

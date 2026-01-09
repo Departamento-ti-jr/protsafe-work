@@ -63,9 +63,9 @@ export class AnsIntegrationService {
         const caminhoDocumentosCompletares = defesaMessage.s3PathDocAdicional;
 
         // //02 - pegar credencial da ans
-        // console.log(operadora)
-        // const credentialAns = await this.vaultService.getSecret(operadora);
-
+        console.log(operadora)
+        const credentialAns = await this.vaultService.getSecret(operadora);
+        const scope = 'br.gov.ans.eprotocolo.operadora br.gov.ans.eprotocolo.operadoras.notificacoes.r br.gov.ans.eprotocolo.operadoras.peticoes br.gov.ans.eprotocolo.operadoras.peticoes.r'
         // console.log(credentialAns);
 
         // 03 - PEGAR O DOCUMENTO DO S3 principal
@@ -81,8 +81,8 @@ export class AnsIntegrationService {
 
         // Token autorização ANS
         this.logger.log('Solicitando token de autorização OAuth2 da ANS...');
-        //const accessToken = await this.authorizationToken(credentialAns.scope, credentialAns.client_id, credentialAns.client_secret);
-        const accessToken = await this.authorizationToken('br.gov.ans.eprotocolo.operadora br.gov.ans.eprotocolo.operadoras.notificacoes.r br.gov.ans.eprotocolo.operadoras.peticoes br.gov.ans.eprotocolo.operadoras.peticoes.r', '2509.apps.ans.gov.br', '4dxkwjcizj0312r');
+        const accessToken = await this.authorizationToken(scope, credentialAns.client_id, credentialAns.client_secret);
+        //const accessToken = await this.authorizationToken(scope, '2509.apps.ans.gov.br', '4dxkwjcizj0312r');
 
         const bearerToken = accessToken.access_token;
         //this.logger.log('OAuth2 da ANS...', accessToken);
@@ -128,7 +128,7 @@ export class AnsIntegrationService {
 
         this.logger.log(`Processo de envio para ANS concluído com sucesso. Protocolo: ${protocoloId}`);
 
-        return { protocoloId: protocoloId, id: defesaMessage.id};
+        return { protocoloId: protocoloId, id: defesaMessage.id };
         //return "";
     }
 
@@ -298,15 +298,15 @@ export class AnsIntegrationService {
         }
     }
 
-private extractAnsError(ansData: any) {
-    if (!ansData) return 'Erro desconhecido retornado pela ANS';
+    private extractAnsError(ansData: any) {
+        if (!ansData) return 'Erro desconhecido retornado pela ANS';
 
-    return {
-        codigo: ansData.codigo ?? ansData.code,
-        mensagem: ansData.mensagem ?? ansData.message,
-        detalhes: ansData.detalhes ?? ansData.errors,
-    };
-}
+        return {
+            codigo: ansData.codigo ?? ansData.code,
+            mensagem: ansData.mensagem ?? ansData.message,
+            detalhes: ansData.detalhes ?? ansData.errors,
+        };
+    }
     async addDocumentoPrincipal(
         fileNamePrincipal: string,
         token: string,
