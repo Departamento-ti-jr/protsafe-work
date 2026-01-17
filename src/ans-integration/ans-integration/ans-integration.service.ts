@@ -69,15 +69,8 @@ export class AnsIntegrationService {
         // console.log(credentialAns);
 
         // 03 - PEGAR O DOCUMENTO DO S3 principal
-        const docPrincipal = defesaMessage.s3PdfPath;
-        const docsAdditional = defesaMessage.s3PathDocAdicional;
-        // /const documentsAdicionais = [];
-        //const documentsAns = {
-        //   principal: S3PdfPath,
-        //    adicionais: [] as string[]
-        // }
-        // // const documentsAdicionais = filesS3ToUploadAsns.map(arq => arq.Key);
-        // // documentsAns.adicionais = documentsAdicionais;
+        //const docPrincipal = defesaMessage.s3PdfPath;
+       // const docsAdditional = defesaMessage.s3PathDocAdicional;
 
         // Token autorização ANS
         this.logger.log('Solicitando token de autorização OAuth2 da ANS...');
@@ -115,14 +108,14 @@ export class AnsIntegrationService {
 
         //## Envio do documento principal
         if (protocoloId) {
-            await this.addDocumentoPrincipal(docPrincipal, bearerToken, registroAns, protocoloId, tipoPeticao, defesaMessage.id);
+            await this.addDocumentoPrincipal(bearerToken, registroAns, protocoloId, tipoPeticao, defesaMessage);
         }
 
         // Envio dos documentos complementares para ANS
-        if (docsAdditional?.length) {
+        if (defesaMessage.s3PathDocAdicional?.length) {
             this.logger.log(`Enviando documentos complementares`);
 
-            await this.addDocumentoComplementar(bearerToken, docsAdditional, registroAns, protocoloId, tipoPeticao, defesaMessage.dataInclusao, defesaMessage.requiredDocsCount);
+            await this.addDocumentoComplementar(bearerToken, protocoloId, tipoPeticao, defesaMessage);
 
         }
 
@@ -308,20 +301,21 @@ export class AnsIntegrationService {
         };
     }
     async addDocumentoPrincipal(
-        fileNamePrincipal: string,
+        
         token: string,
         ansRegister: string,
         protocoloId: string,
         tipoPeticao: string,
-        idDoc: number
+        defesaMessage: DefesaSqsMessageDto
     ): Promise<void> {
+         const fileNamePrincipal = defesaMessage.id;
         this.logger.log(`Iniciando upload do documento principal: ${fileNamePrincipal}`);
-        const bufferPrincipal = await this.s3Service.downloadAsBufferByUrl(fileNamePrincipal);
+        const bufferPrincipal = await this.s3Service.downloadAsBufferByUrl(defesaMessage.s3PdfPath);
         const shar256Buffer = await this.generateSHA256(bufferPrincipal);
         const uint8Array = new Uint8Array(bufferPrincipal);
         const blob = new Blob([uint8Array], { type: 'application/pdf' });
         const formData = new FormData();
-        formData.append('nomeArquivo', idDoc.toString() + ".pdf");
+        formData.append('nomeArquivo', defesaMessage.id.toString() + ".pdf");
         formData.append('assunto', 'Impugnação referente ao atendimento');
         formData.append('arquivo', blob, "98_68aa31dda62633a127dbf80c.pdf");
         formData.append('hash', shar256Buffer);
@@ -342,14 +336,16 @@ export class AnsIntegrationService {
     }
 
     async addDocumentoComplementar(
-        token: string, documentAdditional: any[], ansRegister: string, protocoloId: string, tipoPeticao: string, inclusao: any, requiredDocsCount: any): Promise<void> {
-        this.logger.log(`Iniciando envio de ${documentAdditional.length} documento(s) complementar(es) para ANS`);
-
+        token: string, protocoloId: string, tipoPeticao: string,  defesaMessage: DefesaSqsMessageDto): Promise<void> {
+        const documentAdditional = defesaMessage.s3PathDocAdicional ?? [];
+        this.logger.log(`Iniciando envio de ${defesaMessage.s3PathDocAdicional?.length} documento(s) complementar(es) para ANS`);
+        const requiredDocuments = defesaMessage.requiredDocsCount;
+        const dataInclusao = defesaMessage.dataInclusao?? ''
         for (const [index, doc] of documentAdditional.entries()) {
             try {
 
                 const fileNameDocumentUpload = doc.id + ".pdf";
-                this.logger.log(`📄 Processando documento complementar: ${JSON.stringify(doc)} - INDEX: ${index} - ${requiredDocsCount}`);
+                this.logger.log(`📄 Processando documento complementar: ${JSON.stringify(doc)} - INDEX: ${index} - ${requiredDocuments}`);
                 // normaliza a key para não dar NoSuchKey
                 const bufferComplementar = await this.s3Service.downloadAsBufferByUrl(doc.url);
 
@@ -358,21 +354,21 @@ export class AnsIntegrationService {
                 const blob = new Blob([uint8Array], { type: 'application/pdf' });
 
                 const formData = new FormData();
-                formData.append('nomeArquivo', `${index + 1}_${requiredDocsCount}_${fileNameDocumentUpload}`);
+                formData.append('nomeArquivo', `${index + 1}_${requiredDocuments}_${doc.fileName}`);
                 formData.append('assunto', 'Documento comprobatório');
                 formData.append('tipoDocumento', '61'); // TODO: substituir valor fixo
-                const dataDocumento = this.formatBrazilianDateToISO(inclusao);
+                const dataDocumento = this.formatBrazilianDateToISO(dataInclusao);
 
                 // Log detalhado da data
                 this.logger.log(`📅 Processando data do documento ${fileNameDocumentUpload}:`, {
-                    dataInclusaoOriginal: inclusao,
+                    dataInclusaoOriginal: dataInclusao,
                     dataDocumentoFormatada: dataDocumento,
-                    tipoConversao: inclusao ? 'Data brasileira (DD/MM/YYYY) convertida para ISO (YYYY-MM-DD)' : 'Data atual (inclusao ausente)'
+                    tipoConversao: dataInclusao ? 'Data brasileira (DD/MM/YYYY) convertida para ISO (YYYY-MM-DD)' : 'Data atual (inclusao ausente)'
                 });
 
                 formData.append('dataDocumento', dataDocumento);
                 formData.append('arquivo', blob, fileNameDocumentUpload);
-                formData.append('hash', sha256Buffer);
+                formData.append('hash', doc.hash);
 
                 // Log de todos os campos enviados no FormData
                 /*this.logger.log(`📋 Campos enviados no FormData para ${doc.filename}:`, {
@@ -385,7 +381,7 @@ export class AnsIntegrationService {
                     tamanhoArquivo: bufferComplementar.length + ' bytes'
                 });*/
 
-                const url = `https://www.ans.gov.br/e-protocolo/v2/operadoras/${ansRegister}/peticoes/ressarcimento/${tipoPeticao}/${protocoloId}/documentos/complementares`;
+                const url = `https://www.ans.gov.br/e-protocolo/v2/operadoras/${defesaMessage.ansRegister}/peticoes/ressarcimento/${tipoPeticao}/${protocoloId}/documentos/complementares`;
 
 
 
@@ -413,19 +409,6 @@ export class AnsIntegrationService {
                 const serverMessage = responseData?.message || error.message || 'Erro desconhecido';
                 const timestamp = responseData?.timestamp || new Date().toISOString();
 
-                // Log detalhado do erro da ANS
-                this.logger.error(`❌ Erro ao enviar documento ${doc.filename}`, {
-                    status,
-                    url: error?.config?.url,
-                    method: error?.config?.method,
-                    responseData: JSON.stringify(responseData),
-                    responseHeaders: JSON.stringify(responseHeaders),
-                    requestHeaders: JSON.stringify(error?.config?.headers),
-                    filename: doc.filename,
-                    s3path: doc.s3path,
-                    timestamp
-                });
-
                 // Log adicional para debug
                 this.logger.debug('Detalhes completos do erro ANS', {
                     errorMessage: error.message,
@@ -441,7 +424,7 @@ export class AnsIntegrationService {
                 // relança para o controller tratar se necessário
                 throw new HttpException(
                     {
-                        message: `Falha ao enviar documento ${doc.filename}`,
+                        message: `Falha ao enviar documento`,
                         detalhe: serverMessage,
                         responseData,
                         timestamp,

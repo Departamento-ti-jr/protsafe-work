@@ -6,4 +6,10 @@ export class AnexoAdicionalDto {
 
   @IsString()
   url: string;
+
+  @IsString()
+  hash: string;
+
+  @IsString()
+  fileName: string;
 }

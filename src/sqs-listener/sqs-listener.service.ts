@@ -56,6 +56,8 @@ export class SqsListenerService implements OnModuleInit, OnModuleDestroy {
 
             try {
               // Processa a mensagem e só deleta se for bem-sucedido
+              this.logger.log(`Processamento bem-sucedido. Protocolo ANS: ${JSON.stringify(message.Body!)}`);
+              
               const protocoloData = await this.ansIntegration.enviarImpugnacao(JSON.parse(message.Body!));
               const protocolQueueUrl = process.env.AWS_SQS_PROTOCOL_QUEUE_URL!;
               // Se chegou até aqui, o processamento foi bem-sucedido
