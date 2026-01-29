@@ -54,25 +54,34 @@ export class SqsListenerService implements OnModuleInit, OnModuleDestroy {
           for (const message of response.Messages) {
             this.logger.log(`Mensagem recebida: ${message.Body}`);
 
+            let protocoloData;
             try {
-              // Processa a mensagem e só deleta se for bem-sucedido
-              const protocoloData = await this.ansIntegration.enviarImpugnacao(JSON.parse(message.Body!));
-              const protocolQueueUrl = process.env.AWS_SQS_PROTOCOL_QUEUE_URL!;
-              // Se chegou até aqui, o processamento foi bem-sucedido
-              this.logger.log(`Processamento bem-sucedido. Protocolo ANS: ${JSON.stringify(protocoloData)}`);
-
-              await this.sendMessage(
-                process.env.AWS_SQS_PROTOCOL_QUEUE_URL!,
-                protocoloData
-              );
-
-              if (message.ReceiptHandle) {
-                await this.deleteMessage(message.ReceiptHandle);
-              }
+              protocoloData = await this.ansIntegration.enviarImpugnacao(JSON.parse(message.Body!));
             } catch (processError) {
-              this.logger.error(`Erro ao processar mensagem: ${processError.message}`, processError.stack);
-              this.logger.warn('Mensagem não será deletada do SQS devido ao erro no processamento');
-              // Não deleta a mensagem em caso de erro - ela ficará disponível para reprocessamento
+              protocoloData = {
+                id: JSON.parse(message.Body!).id || 'unknown',
+                error: {
+                  status: 500,
+                  message: processError.message
+                }
+              };
+            }
+
+            // Sempre envia o resultado
+            await this.sendMessage(
+              process.env.AWS_SQS_PROTOCOL_QUEUE_URL!,
+              protocoloData
+            );
+
+            /* // Log do resultado
+            if (protocoloData.error) {
+              this.logger.warn(`Processamento com erro enviado para fila. ID: ${protocoloData.id}, Erro: ${protocoloData.error.message}`);
+            } else {
+              this.logger.log(`Processamento bem-sucedido enviado para fila. ID: ${protocoloData.id}, Protocolo: ${protocoloData.protocoloId}`);
+            } */
+
+            if (message.ReceiptHandle) {
+              await this.deleteMessage(message.ReceiptHandle);
             }
           }
         } else {

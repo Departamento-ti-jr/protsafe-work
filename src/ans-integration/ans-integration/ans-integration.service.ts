@@ -39,6 +39,8 @@ export class AnsIntegrationService {
     async enviarImpugnacao(
         defesaMessage: DefesaSqsMessageDto,
     ): Promise<any> {
+        const returnResult: any = {};
+        returnResult.id = defesaMessage.id;
         this.logger.log(
             `Iniciando processamento de impugnação ANS`,
             JSON.stringify(defesaMessage),
@@ -69,15 +71,8 @@ export class AnsIntegrationService {
         // console.log(credentialAns);
 
         // 03 - PEGAR O DOCUMENTO DO S3 principal
-        const docPrincipal = defesaMessage.s3PdfPath;
-        const docsAdditional = defesaMessage.s3PathDocAdicional;
-        // /const documentsAdicionais = [];
-        //const documentsAns = {
-        //   principal: S3PdfPath,
-        //    adicionais: [] as string[]
-        // }
-        // // const documentsAdicionais = filesS3ToUploadAsns.map(arq => arq.Key);
-        // // documentsAns.adicionais = documentsAdicionais;
+        //const docPrincipal = defesaMessage.s3PdfPath;
+        // const docsAdditional = defesaMessage.s3PathDocAdicional;
 
         // Token autorização ANS
         this.logger.log('Solicitando token de autorização OAuth2 da ANS...');
@@ -107,29 +102,75 @@ export class AnsIntegrationService {
         // // Envio da petição para ANS
         this.logger.log(`Enviando petição ${tipoPeticao} para ANS - Registro: ${registroAns}`);
 
-        const protocoloId = await this.enviarPeticaoAns(JSON.stringify(payloadEnvioAns), bearerToken, registroAns, tipoPeticao);
+        //const protocoloId = await this.enviarPeticaoAns(JSON.stringify(payloadEnvioAns), bearerToken, registroAns, tipoPeticao);
+        let protocoloId: string | undefined;
 
-        this.logger.log(`✅ Petição enviada com sucesso - Protocolo ANS: ${protocoloId}`);
+        try {
+            this.logger.debug(`Chamando enviarPeticaoAns com payload: ${JSON.stringify(payloadEnvioAns)}`);
+            protocoloId = await this.enviarPeticaoAns(
+                JSON.stringify(payloadEnvioAns),
+                bearerToken,
+                registroAns,
+                tipoPeticao
+            );
+
+            this.logger.log(`✅ Petição enviada com sucesso - Protocolo ANS: ${protocoloId}`);
+        } catch (error: any) {
+            this.logger.error(`❌ Erro ao enviar petição para ANS: ${error?.response?.status} - ${error?.response?.data?.mensagem || error.message}`);
+            this.logger.error(`Detalhes completos do erro:`, error?.response?.data || error);
+            returnResult.error = {
+                status: error?.response?.status,
+                message: 'Erro ao enviar petição para ANS',
+                detalhe: error?.response?.data
+            };
+        }
         //await this.sqsService.sendMessage(protocolQueueUrl, { protocoloId: protocoloId, _id: body._id });
 
 
-        //## Envio do documento principal
+        // ## Envio do documento principal
         if (protocoloId) {
-            await this.addDocumentoPrincipal(docPrincipal, bearerToken, registroAns, protocoloId, tipoPeticao, defesaMessage.id);
+            returnResult.protocoloId = protocoloId;
+
+            try {
+                await this.addDocumentoPrincipal(
+                    bearerToken,
+                    registroAns,
+                    protocoloId,
+                    tipoPeticao,
+                    defesaMessage
+                );
+            } catch (error: any) {
+                returnResult.error = {
+                    status: error?.response?.status,
+                    message: 'Erro ao enviar documento principal para ANS',
+                    detalhe: error?.response?.data
+                };
+            }
         }
 
-        // Envio dos documentos complementares para ANS
-        if (docsAdditional?.length) {
+        // ## Envio dos documentos complementares
+        if (protocoloId && defesaMessage.s3PathDocAdicional?.length) {
             this.logger.log(`Enviando documentos complementares`);
 
-            await this.addDocumentoComplementar(bearerToken, docsAdditional, registroAns, protocoloId, tipoPeticao, defesaMessage.dataInclusao, defesaMessage.requiredDocsCount);
-
+            try {
+                await this.addDocumentoComplementar(
+                    bearerToken,
+                    protocoloId,
+                    tipoPeticao,
+                    defesaMessage
+                );
+            } catch (error: any) {
+                returnResult.error = {
+                    status: error?.response?.status,
+                    message: 'Erro ao enviar documentos complementares para ANS',
+                    detalhe: error?.response?.data
+                };
+            }
         }
 
-        this.logger.log(`Processo de envio para ANS concluído com sucesso. Protocolo: ${protocoloId}`);
+        this.logger.log(`Processo de envio para ANS concluído. Protocolo: ${protocoloId}${returnResult.error ? ' - COM ERROS' : ' - SUCESSO'}`);
 
-        return { protocoloId: protocoloId, id: defesaMessage.id };
-        //return "";
+        return returnResult;
     }
 
 
@@ -184,120 +225,33 @@ export class AnsIntegrationService {
         tipoPeticao: string,
     ): Promise<string> {
         const url = `https://www.ans.gov.br/e-protocolo/v2/operadoras/${ansRegister}/peticoes/ressarcimento/${tipoPeticao}`;
+        
+        this.logger.debug(`Iniciando enviarPeticaoAns para URL: ${url}`);
 
         try {
             const response = await firstValueFrom(
-                this.httpService
-                    .post(url, bodyPeticao, {
-                        headers: {
-                            Authorization: `Bearer ${token}`,
-                            'Content-Type': 'application/json',
-                            Accept: 'application/json',
-                        },
-                        timeout: 15000,
-                    })
-                    .pipe(
-                        retry({
-                            count: 2,
-                            delay: (error, retryCount) => {
-                                const status = error?.response?.status;
-
-                                // ❌ erro funcional → não faz retry
-                                if (status && status < 500) {
-                                    throw error;
-                                }
-
-                                this.logger.warn(
-                                    {
-                                        retry: retryCount,
-                                        status,
-                                        url,
-                                    },
-                                    'Erro técnico ao chamar ANS. Tentando novamente...',
-                                );
-
-                                return timer(1000 * retryCount);
-                            },
-                        }),
-                    ),
+                this.httpService.post(url, bodyPeticao, {
+                    headers: {
+                        Authorization: `Bearer ${token}`,
+                        'Content-Type': 'application/json',
+                        Accept: 'application/json',
+                    },
+                    timeout: 15000,
+                }),
             );
 
             const codigo = response.data?.codigo;
 
             if (!codigo) {
-                this.logger.error(
-                    {
-                        response: response.data,
-                        url,
-                    },
-                    'ANS respondeu sem código de protocolo',
-                );
-
-                throw new HttpException(
-                    'Resposta inválida da ANS: código do protocolo ausente',
-                    HttpStatus.BAD_GATEWAY,
-                );
+                throw new Error('ANS respondeu sem código de protocolo');
             }
 
             return codigo;
         } catch (error) {
-            /**
-             * ERRO VINDO DA ANS
-             */
-            if (error instanceof AxiosError) {
-                const status = error.response?.status ?? HttpStatus.SERVICE_UNAVAILABLE;
-                const ansData = error.response?.data;
-
-                this.logger.error(
-                    {
-                        status,
-                        ansResponse: ansData,
-                        url,
-                    },
-                    'Erro retornado pela ANS',
-                );
-
-                /**
-                 * Erro funcional (4xx)
-                 */
-                if (status >= 400 && status < 500) {
-                    throw new HttpException(
-                        {
-                            message: 'Erro funcional retornado pela ANS',
-                            details: this.extractAnsError(ansData),
-                        },
-                        status,
-                    );
-                }
-
-                /**
-                 * Erro técnico (5xx / timeout)
-                 */
-                throw new HttpException(
-                    {
-                        message: 'Falha técnica ao comunicar com a ANS',
-                        ansStatus: status,
-                        ansResponse: ansData,
-                    },
-                    HttpStatus.BAD_GATEWAY,
-                );
-            }
-
-            /**
-             * Erros não mapeados
-             */
-            this.logger.error(
-                { error },
-                'Erro inesperado ao enviar petição para ANS',
-            );
-
-            throw new HttpException(
-                'Erro interno ao processar petição ANS',
-                HttpStatus.INTERNAL_SERVER_ERROR,
-            );
+            // 🚀 NÃO transforme o erro
+            throw error;
         }
     }
-
     private extractAnsError(ansData: any) {
         if (!ansData) return 'Erro desconhecido retornado pela ANS';
 
@@ -308,20 +262,21 @@ export class AnsIntegrationService {
         };
     }
     async addDocumentoPrincipal(
-        fileNamePrincipal: string,
+
         token: string,
         ansRegister: string,
         protocoloId: string,
         tipoPeticao: string,
-        idDoc: number
+        defesaMessage: DefesaSqsMessageDto
     ): Promise<void> {
+        const fileNamePrincipal = defesaMessage.id;
         this.logger.log(`Iniciando upload do documento principal: ${fileNamePrincipal}`);
-        const bufferPrincipal = await this.s3Service.downloadAsBufferByUrl(fileNamePrincipal);
+        const bufferPrincipal = await this.s3Service.downloadAsBufferByUrl(defesaMessage.s3PdfPath);
         const shar256Buffer = await this.generateSHA256(bufferPrincipal);
         const uint8Array = new Uint8Array(bufferPrincipal);
         const blob = new Blob([uint8Array], { type: 'application/pdf' });
         const formData = new FormData();
-        formData.append('nomeArquivo', idDoc.toString() + ".pdf");
+        formData.append('nomeArquivo', defesaMessage.id.toString() + ".pdf");
         formData.append('assunto', 'Impugnação referente ao atendimento');
         formData.append('arquivo', blob, "98_68aa31dda62633a127dbf80c.pdf");
         formData.append('hash', shar256Buffer);
@@ -342,14 +297,16 @@ export class AnsIntegrationService {
     }
 
     async addDocumentoComplementar(
-        token: string, documentAdditional: any[], ansRegister: string, protocoloId: string, tipoPeticao: string, inclusao: any, requiredDocsCount: any): Promise<void> {
-        this.logger.log(`Iniciando envio de ${documentAdditional.length} documento(s) complementar(es) para ANS`);
-
+        token: string, protocoloId: string, tipoPeticao: string, defesaMessage: DefesaSqsMessageDto): Promise<void> {
+        const documentAdditional = defesaMessage.s3PathDocAdicional ?? [];
+        this.logger.log(`Iniciando envio de ${defesaMessage.s3PathDocAdicional?.length} documento(s) complementar(es) para ANS`);
+        const requiredDocuments = defesaMessage.requiredDocsCount;
+        const dataInclusao = defesaMessage.dataInclusao ?? ''
         for (const [index, doc] of documentAdditional.entries()) {
             try {
 
                 const fileNameDocumentUpload = doc.id + ".pdf";
-                this.logger.log(`📄 Processando documento complementar: ${JSON.stringify(doc)} - INDEX: ${index} - ${requiredDocsCount}`);
+                this.logger.log(`📄 Processando documento complementar: ${JSON.stringify(doc)} - INDEX: ${index} - ${requiredDocuments}`);
                 // normaliza a key para não dar NoSuchKey
                 const bufferComplementar = await this.s3Service.downloadAsBufferByUrl(doc.url);
 
@@ -358,37 +315,24 @@ export class AnsIntegrationService {
                 const blob = new Blob([uint8Array], { type: 'application/pdf' });
 
                 const formData = new FormData();
-                formData.append('nomeArquivo', `${index + 1}_${requiredDocsCount}_${fileNameDocumentUpload}`);
+                formData.append('nomeArquivo', `${index + 1}_${requiredDocuments}_${doc.fileName}`);
                 formData.append('assunto', 'Documento comprobatório');
                 formData.append('tipoDocumento', '61'); // TODO: substituir valor fixo
-                const dataDocumento = this.formatBrazilianDateToISO(inclusao);
+                const dataDocumento = this.formatBrazilianDateToISO(dataInclusao);
 
                 // Log detalhado da data
                 this.logger.log(`📅 Processando data do documento ${fileNameDocumentUpload}:`, {
-                    dataInclusaoOriginal: inclusao,
+                    dataInclusaoOriginal: dataInclusao,
                     dataDocumentoFormatada: dataDocumento,
-                    tipoConversao: inclusao ? 'Data brasileira (DD/MM/YYYY) convertida para ISO (YYYY-MM-DD)' : 'Data atual (inclusao ausente)'
+                    tipoConversao: dataInclusao ? 'Data brasileira (DD/MM/YYYY) convertida para ISO (YYYY-MM-DD)' : 'Data atual (inclusao ausente)'
                 });
 
                 formData.append('dataDocumento', dataDocumento);
                 formData.append('arquivo', blob, fileNameDocumentUpload);
-                formData.append('hash', sha256Buffer);
+                formData.append('hash', doc.hash);
 
-                // Log de todos os campos enviados no FormData
-                /*this.logger.log(`📋 Campos enviados no FormData para ${doc.filename}:`, {
-                    nomeArquivo: doc.filename,
-                    assunto: 'Documento comprobatório',
-                    tipoDocumento: '61',
-                    dataDocumento: dataDocumento,
-                    arquivoNome: doc.filename,
-                    hash: sha256Buffer,
-                    tamanhoArquivo: bufferComplementar.length + ' bytes'
-                });*/
-
-                const url = `https://www.ans.gov.br/e-protocolo/v2/operadoras/${ansRegister}/peticoes/ressarcimento/${tipoPeticao}/${protocoloId}/documentos/complementares`;
-
-
-
+    
+                const url = `https://www.ans.gov.br/e-protocolo/v2/operadoras/${defesaMessage.ansRegister}/peticoes/ressarcimento/${tipoPeticao}/${protocoloId}/documentos/complementares`;
                 const response = await firstValueFrom(
                     this.httpService.post(url, formData, {
                         headers: {
@@ -396,58 +340,10 @@ export class AnsIntegrationService {
                         },
                     }),
                 );
-
-                /* Log da resposta de sucesso
-                this.logger.debug('Resposta ANS para documento complementar', {
-                    status: response.status,
-                    //statusText: response.statusText,
-                    //data: JSON.stringify(response.data),
-                    //headers: JSON.stringify(response.headers)
-                });*/
-
                 this.logger.log(`🆗 Documento complementar enviado com sucesso para ANS - Status: ${response.status}`);
             } catch (error: any) {
-                const status = error?.response?.status || HttpStatus.INTERNAL_SERVER_ERROR;
-                const responseData = error?.response?.data;
-                const responseHeaders = error?.response?.headers;
-                const serverMessage = responseData?.message || error.message || 'Erro desconhecido';
-                const timestamp = responseData?.timestamp || new Date().toISOString();
-
-                // Log detalhado do erro da ANS
-                this.logger.error(`❌ Erro ao enviar documento ${doc.filename}`, {
-                    status,
-                    url: error?.config?.url,
-                    method: error?.config?.method,
-                    responseData: JSON.stringify(responseData),
-                    responseHeaders: JSON.stringify(responseHeaders),
-                    requestHeaders: JSON.stringify(error?.config?.headers),
-                    filename: doc.filename,
-                    s3path: doc.s3path,
-                    timestamp
-                });
-
-                // Log adicional para debug
-                this.logger.debug('Detalhes completos do erro ANS', {
-                    errorMessage: error.message,
-                    errorCode: error.code,
-                    fullResponse: error.response ? {
-                        status: error.response.status,
-                        statusText: error.response.statusText,
-                        data: error.response.data,
-                        headers: error.response.headers
-                    } : 'No response object'
-                });
-
-                // relança para o controller tratar se necessário
-                throw new HttpException(
-                    {
-                        message: `Falha ao enviar documento ${doc.filename}`,
-                        detalhe: serverMessage,
-                        responseData,
-                        timestamp,
-                    },
-                    status,
-                );
+                this.logger.error(`Erro ao enviar documento complementar ${doc.fileName}: ${error.message}`);
+                throw error;
             }
         }
 
